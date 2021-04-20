@@ -101,11 +101,12 @@ async def run_queries(db_file: Path, *queries: str):
 
 @pytest.mark.asyncio
 class TestQueryLoop:
-    async def test_start(self, query_loop):
+    async def test_start(self, query_tracker, query_loop):
         """The start method starts timed calls for queries."""
         await query_loop.start()
         timed_call = query_loop._timed_calls["q"]
         assert timed_call.running
+        await query_tracker.wait_results()
 
     async def test_stop(self, query_loop):
         """The stop method stops timed calls for queries."""
@@ -266,7 +267,7 @@ class TestQueryLoop:
         """Count of database errors is incremented on failed connection."""
         query_loop = make_query_loop()
         db = query_loop._config.databases["db"]
-        mock_connect = mocker.patch.object(db._engine, "connect")
+        mock_connect = mocker.patch.object(db._conn.engine, "connect")
         mock_connect.side_effect = Exception("connection failed")
         await query_loop.start()
         await query_tracker.wait_failures()
@@ -319,19 +320,23 @@ class TestQueryLoop:
         assert len(query_tracker.queries) == 2
 
     async def test_run_timed_queries_invalid_result_count(
-        self, query_tracker, config_data, make_query_loop, advance_time
+        self, query_tracker, config_data, make_query_loop
     ):
         """Timed queries returning invalid elements count are removed."""
         config_data["queries"]["q"]["sql"] = "SELECT 100.0 AS a, 200.0 AS b"
+        config_data["queries"]["q"]["interval"] = 1.0
         query_loop = make_query_loop()
         await query_loop.start()
-        await advance_time(0)  # kick the first run
-        assert len(query_tracker.queries) == 1
+        timed_call = query_loop._timed_calls["q"]
+        await asyncio.sleep(1.1)
+        await query_tracker.wait_failures()
+        assert len(query_tracker.failures) == 1
         assert len(query_tracker.results) == 0
-        # the query is not run again
-        await advance_time(5)
-        assert len(query_tracker.results) == 0
-        await advance_time(5)
+        # the query has been stopped and removed
+        assert not timed_call.running
+        await asyncio.sleep(1.1)
+        await query_tracker.wait_failures()
+        assert len(query_tracker.failures) == 1
         assert len(query_tracker.results) == 0
 
     async def test_run_timed_queries_invalid_result_count_stop_task(
